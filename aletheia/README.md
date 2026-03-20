@@ -22,6 +22,7 @@ Karrabi–Montaseri–Pagano. It establishes that specific bounded combinations 
   * Problem 8: A ([tex](FirstProof/FP8_A.tex), [pdf](FirstProof/FP8_A.pdf)), B ([tex](FirstProof/FP8_B.tex), [pdf](FirstProof/FP8_B.pdf)).
   * Problem 9: A ([tex](FirstProof/FP9_A.tex), [pdf](FirstProof/FP9_A.pdf)), Af ([tex](FirstProof/FP9_Af.tex), [pdf](FirstProof/FP9_Af.pdf)), B ([tex](FirstProof/FP9_B.tex), [pdf](FirstProof/FP9_B.pdf)).
   * Problem 10: A ([tex](FirstProof/FP10_A.tex), [pdf](FirstProof/FP10_A.pdf)), B ([tex](FirstProof/FP10_B.tex), [pdf](FirstProof/FP10_B.pdf)).
+* Proof that the Hodge bundle on the moduli space of genus g curves is simple, i.e., admits no non-trivial sub-bundles. : [tex](HodgeBundle/HodgeBundle.tex), [pdf](HodgeBundle/HodgeBundle.pdf) ([full paper](https://arxiv.org/pdf/2603.19052)).
 
 ## License and disclaimer
 
