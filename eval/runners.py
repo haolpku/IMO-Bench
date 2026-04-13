@@ -1,7 +1,9 @@
 """
 Evaluation runners for all three IMO-Bench benchmarks.
-Each runner handles: model inference -> autograding -> summary reporting.
+Two-phase concurrent execution: Phase 1 (solve) → Phase 2 (grade).
 """
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .api import call_api
 from .checkpoint import CheckpointManager
@@ -24,6 +26,29 @@ def _header(title: str, lines: list[str]):
     print(f"{'='*60}\n")
 
 
+def _run_parallel(tasks, fn, max_workers, label=""):
+    """Run tasks concurrently, printing progress."""
+    total = len(tasks)
+    if total == 0:
+        print(f"  {label}: nothing to do (all cached)")
+        return
+
+    done_count = 0
+    print(f"  {label}: {total} tasks, concurrency={max_workers}")
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(fn, t): t for t in tasks}
+        for future in as_completed(futures):
+            done_count += 1
+            task = futures[future]
+            try:
+                result_msg = future.result()
+                print(f"  [{done_count}/{total}] {result_msg}")
+            except Exception as e:
+                pid = task.get("pid", task.get("gid", "?"))
+                print(f"  [{done_count}/{total}] {pid} ERROR: {e}")
+
+
 # ──────────────────────────────────────────────
 # IMO-AnswerBench
 # ──────────────────────────────────────────────
@@ -40,49 +65,57 @@ def run_answerbench(args):
     if args.limit:
         problems = problems[:args.limit]
     total = len(problems)
+    workers = args.concurrency
 
     done_s = sum(1 for p in problems if ckpt.is_done(p["Problem ID"], "solve"))
     done_g = sum(1 for p in problems if ckpt.is_done(p["Problem ID"], "grade"))
     _header("IMO-AnswerBench", [
         f"Solve model:  {args.model}",
         f"Grader model: {args.grader_model}",
-        f"Problems:     {total}",
+        f"Problems:     {total}  (concurrency: {workers})",
         f"Checkpoint:   {done_s} solved, {done_g} graded",
     ])
 
-    for i, prob in enumerate(problems):
-        pid = prob["Problem ID"]
-        problem_text = prob["Problem"]
-        golden_answer = prob["Short Answer"]
-
-        # Stage 1: solve
+    # Phase 1: Solve
+    solve_tasks = []
+    for p in problems:
+        pid = p["Problem ID"]
         if not ckpt.is_done(pid, "solve"):
-            print(f"[{i+1}/{total}] Solving {pid} ...", end=" ", flush=True)
-            prompt = SOLVE_PROMPT.format(problem=problem_text)
-            response = call_api(args.base_url, args.api_key, args.model,
-                                prompt, temperature=args.temperature)
-            ckpt.set_result(pid, "solve", response)
-            print("done")
-        else:
-            print(f"[{i+1}/{total}] {pid} solve: cached")
+            solve_tasks.append({"pid": pid, "problem": p["Problem"]})
 
-        # Stage 2: grade
+    def do_solve(t):
+        prompt = SOLVE_PROMPT.format(problem=t["problem"])
+        resp = call_api(args.base_url, args.api_key, args.model,
+                        prompt, temperature=args.temperature)
+        ckpt.set_result(t["pid"], "solve", resp)
+        return f"{t['pid']} solved"
+
+    _run_parallel(solve_tasks, do_solve, workers, "Phase 1: Solve")
+
+    # Phase 2: Grade
+    grade_tasks = []
+    for p in problems:
+        pid = p["Problem ID"]
         if not ckpt.is_done(pid, "grade"):
-            response = ckpt.get_result(pid, "solve")
-            print(f"[{i+1}/{total}] Grading {pid} ...", end=" ", flush=True)
-            grade_prompt = ANSWER_AUTOGRADER_PROMPT.format(
-                problem=problem_text, response=response, answer=golden_answer
-            )
-            grade_resp = call_api(args.base_url, args.api_key, args.grader_model,
-                                  grade_prompt, temperature=0.0)
-            verdict = parse_answer_grade(grade_resp)
-            ckpt.set_result(pid, "grade", {"raw": grade_resp, "verdict": verdict})
-            mark = "✓" if verdict == "Correct" else "✗"
-            print(f"{mark} ({verdict})")
-        else:
-            cached = ckpt.get_result(pid, "grade")
-            mark = "✓" if cached["verdict"] == "Correct" else "✗"
-            print(f"[{i+1}/{total}] {pid} grade: cached {mark}")
+            grade_tasks.append({
+                "pid": pid,
+                "problem": p["Problem"],
+                "answer": p["Short Answer"],
+            })
+
+    def do_grade(t):
+        response = ckpt.get_result(t["pid"], "solve")
+        prompt = ANSWER_AUTOGRADER_PROMPT.format(
+            problem=t["problem"], response=response, answer=t["answer"]
+        )
+        grade_resp = call_api(args.base_url, args.api_key, args.grader_model,
+                              prompt, temperature=0.0)
+        verdict = parse_answer_grade(grade_resp)
+        ckpt.set_result(t["pid"], "grade", {"raw": grade_resp, "verdict": verdict})
+        mark = "✓" if verdict == "Correct" else "✗"
+        return f"{t['pid']} {mark} ({verdict})"
+
+    _run_parallel(grade_tasks, do_grade, workers, "Phase 2: Grade")
 
     _print_answerbench_summary(ckpt, problems)
 
@@ -135,47 +168,58 @@ def run_proofbench(args):
     if args.limit:
         problems = problems[:args.limit]
     total = len(problems)
+    workers = args.concurrency
 
     done_s = sum(1 for p in problems if ckpt.is_done(p["Problem ID"], "solve"))
     done_g = sum(1 for p in problems if ckpt.is_done(p["Problem ID"], "grade"))
     _header("IMO-ProofBench", [
         f"Solve model:  {args.model}",
         f"Grader model: {args.grader_model}",
-        f"Problems:     {total}",
+        f"Problems:     {total}  (concurrency: {workers})",
         f"Checkpoint:   {done_s} solved, {done_g} graded",
     ])
 
-    for i, prob in enumerate(problems):
-        pid = prob["Problem ID"]
-        problem_text = prob["Problem"]
-        ref_solution = prob["Solution"]
-        guidelines = prob["Grading guidelines"]
-
+    # Phase 1: Solve
+    solve_tasks = []
+    for p in problems:
+        pid = p["Problem ID"]
         if not ckpt.is_done(pid, "solve"):
-            print(f"[{i+1}/{total}] Solving {pid} ...", end=" ", flush=True)
-            prompt = SOLVE_PROOF_PROMPT.format(problem=problem_text)
-            response = call_api(args.base_url, args.api_key, args.model,
-                                prompt, temperature=args.temperature)
-            ckpt.set_result(pid, "solve", response)
-            print("done")
-        else:
-            print(f"[{i+1}/{total}] {pid} solve: cached")
+            solve_tasks.append({"pid": pid, "problem": p["Problem"]})
 
+    def do_solve(t):
+        prompt = SOLVE_PROOF_PROMPT.format(problem=t["problem"])
+        resp = call_api(args.base_url, args.api_key, args.model,
+                        prompt, temperature=args.temperature)
+        ckpt.set_result(t["pid"], "solve", resp)
+        return f"{t['pid']} solved"
+
+    _run_parallel(solve_tasks, do_solve, workers, "Phase 1: Solve")
+
+    # Phase 2: Grade
+    grade_tasks = []
+    for p in problems:
+        pid = p["Problem ID"]
         if not ckpt.is_done(pid, "grade"):
-            response = ckpt.get_result(pid, "solve")
-            print(f"[{i+1}/{total}] Grading {pid} ...", end=" ", flush=True)
-            grade_prompt = PROOF_AUTOGRADER_PROMPT.format(
-                problem=problem_text, solution=ref_solution,
-                guidelines=guidelines, response=response
-            )
-            grade_resp = call_api(args.base_url, args.api_key, args.grader_model,
-                                  grade_prompt, temperature=0.0)
-            score = parse_proof_score(grade_resp)
-            ckpt.set_result(pid, "grade", {"raw": grade_resp, "score": score})
-            print(f"score: {score}/7")
-        else:
-            cached = ckpt.get_result(pid, "grade")
-            print(f"[{i+1}/{total}] {pid} grade: cached (score: {cached['score']}/7)")
+            grade_tasks.append({
+                "pid": pid,
+                "problem": p["Problem"],
+                "solution": p["Solution"],
+                "guidelines": p["Grading guidelines"],
+            })
+
+    def do_grade(t):
+        response = ckpt.get_result(t["pid"], "solve")
+        prompt = PROOF_AUTOGRADER_PROMPT.format(
+            problem=t["problem"], solution=t["solution"],
+            guidelines=t["guidelines"], response=response
+        )
+        grade_resp = call_api(args.base_url, args.api_key, args.grader_model,
+                              prompt, temperature=0.0)
+        score = parse_proof_score(grade_resp)
+        ckpt.set_result(t["pid"], "grade", {"raw": grade_resp, "score": score})
+        return f"{t['pid']} score: {score}/7"
+
+    _run_parallel(grade_tasks, do_grade, workers, "Phase 2: Grade")
 
     _print_proofbench_summary(ckpt, problems)
 
@@ -235,39 +279,43 @@ def run_gradingbench(args):
     if args.limit:
         problems = problems[:args.limit]
     total = len(problems)
+    workers = args.concurrency
 
     done = sum(1 for p in problems if ckpt.is_done(p["Grading ID"], "grade"))
     _header("IMO-GradingBench", [
         f"Model:      {args.model}",
-        f"Examples:   {total}",
+        f"Examples:   {total}  (concurrency: {workers})",
         f"Checkpoint: {done} graded",
     ])
 
-    for i, prob in enumerate(problems):
-        gid = prob["Grading ID"]
-        problem_text = prob["Problem"]
-        solution_text = prob["Response"]
-        human_points = int(prob["Points"])
-        human_label = POINTS_TO_GRADE.get(human_points, "incorrect")
-
+    grade_tasks = []
+    for p in problems:
+        gid = p["Grading ID"]
         if not ckpt.is_done(gid, "grade"):
-            print(f"[{i+1}/{total}] Grading {gid} ...", end=" ", flush=True)
-            prompt = GRADING_BENCH_PROMPT.format(
-                problem=problem_text, response=solution_text
-            )
-            resp = call_api(args.base_url, args.api_key, args.model,
-                            prompt, temperature=0.0)
-            pred_label = parse_grading_label(resp)
-            ckpt.set_result(gid, "grade", {
-                "raw": resp, "pred_label": pred_label,
-                "human_points": human_points, "human_label": human_label,
+            human_points = int(p["Points"])
+            grade_tasks.append({
+                "gid": gid,
+                "problem": p["Problem"],
+                "solution": p["Response"],
+                "human_points": human_points,
+                "human_label": POINTS_TO_GRADE.get(human_points, "incorrect"),
             })
-            match = "✓" if pred_label == human_label else "✗"
-            print(f"{match} pred={pred_label} human={human_label}")
-        else:
-            cached = ckpt.get_result(gid, "grade")
-            match = "✓" if cached["pred_label"] == cached["human_label"] else "✗"
-            print(f"[{i+1}/{total}] {gid}: cached {match}")
+
+    def do_grade(t):
+        prompt = GRADING_BENCH_PROMPT.format(
+            problem=t["problem"], response=t["solution"]
+        )
+        resp = call_api(args.base_url, args.api_key, args.model,
+                        prompt, temperature=0.0)
+        pred_label = parse_grading_label(resp)
+        ckpt.set_result(t["gid"], "grade", {
+            "raw": resp, "pred_label": pred_label,
+            "human_points": t["human_points"], "human_label": t["human_label"],
+        })
+        match = "✓" if pred_label == t["human_label"] else "✗"
+        return f"{t['gid']} {match} pred={pred_label} human={t['human_label']}"
+
+    _run_parallel(grade_tasks, do_grade, workers, "Grading")
 
     _print_gradingbench_summary(ckpt, problems)
 

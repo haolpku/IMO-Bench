@@ -2,7 +2,9 @@
 Autograder prompt templates from the IMO-Bench paper (Appendix A.5 and B.5).
 """
 
-SOLVE_PROMPT = """You are an expert mathematician. Solve the following problem step by step, showing your complete reasoning. Present your final answer clearly at the end.
+SOLVE_PROMPT = r"""You are an expert mathematician. Solve the following problem step by step, showing your complete reasoning.
+
+IMPORTANT: You MUST end your response with your final answer in the format \boxed{{answer}}. This is required for grading.
 
 Problem: {problem}"""
 

@@ -10,7 +10,7 @@ import time
 
 def call_api(base_url: str, api_key: str, model: str, prompt: str,
              max_retries: int = 5, temperature: float = 0.7,
-             max_tokens: int = 16384, timeout: int = 300) -> str:
+             max_tokens: int = 32768, timeout: int = 300) -> str:
     """Call an OpenAI-compatible chat completion API via curl."""
     url = f"{base_url}/chat/completions"
     payload = {

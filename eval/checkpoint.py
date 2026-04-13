@@ -1,15 +1,17 @@
 """
-Checkpoint manager for resumable evaluation runs.
+Thread-safe checkpoint manager for resumable evaluation runs.
 Saves results to JSON after each problem, enabling interrupt/resume.
 """
 
 import json
 import os
+import threading
 
 
 class CheckpointManager:
     def __init__(self, checkpoint_path: str):
         self.path = checkpoint_path
+        self._lock = threading.Lock()
         self.data = self._load()
 
     def _load(self):
@@ -25,20 +27,24 @@ class CheckpointManager:
         os.replace(tmp, self.path)
 
     def is_done(self, problem_id: str, stage: str) -> bool:
-        return self.data["results"].get(problem_id, {}).get(stage) is not None
+        with self._lock:
+            return self.data["results"].get(problem_id, {}).get(stage) is not None
 
     def get_result(self, problem_id: str, stage: str):
-        return self.data["results"].get(problem_id, {}).get(stage)
+        with self._lock:
+            return self.data["results"].get(problem_id, {}).get(stage)
 
     def set_result(self, problem_id: str, stage: str, value):
-        if problem_id not in self.data["results"]:
-            self.data["results"][problem_id] = {}
-        self.data["results"][problem_id][stage] = value
-        self.save()
+        with self._lock:
+            if problem_id not in self.data["results"]:
+                self.data["results"][problem_id] = {}
+            self.data["results"][problem_id][stage] = value
+            self.save()
 
     def set_metadata(self, key, value):
-        self.data["metadata"][key] = value
-        self.save()
+        with self._lock:
+            self.data["metadata"][key] = value
+            self.save()
 
     @property
     def results(self):

@@ -47,6 +47,8 @@ Examples:
                         help="Temperature for the solve model (default: 0.7)")
     parser.add_argument("--limit", type=int, default=None,
                         help="Only evaluate first N problems (for testing)")
+    parser.add_argument("--concurrency", type=int, default=8,
+                        help="Number of parallel API requests (default: 8)")
 
     args = parser.parse_args()
     if args.grader_model is None:
